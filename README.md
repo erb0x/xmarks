@@ -1,20 +1,27 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# XMarks
 
-# Run and deploy your AI Studio app
+Scrape and organize your **X (Twitter) bookmarks** into a searchable local knowledgebase.
 
-This contains everything you need to run your app locally.
+## How It Works
 
-View your app in AI Studio: https://ai.studio/apps/4a9a3889-250c-4bf6-a004-6eed061a2115
+1. A **Tampermonkey userscript** runs in your browser and detects visible tweets on the X bookmarks page.
+2. As you scroll, each bookmark is sent via `POST` to a local **Express API server** and stored in **SQLite**.
+3. A **React dashboard** lets you browse, search, and manage your saved bookmarks.
 
-## Run Locally
+## Quick Start
 
-**Prerequisites:**  Node.js
+```bash
+npm install
+npm run dev
+```
 
+Then open **http://localhost:5173**, go to the **Setup** tab, and follow the Tampermonkey installation instructions.
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+## Stack
+
+| Layer    | Technology                  |
+|----------|-----------------------------|
+| Frontend | React 18 + Vite             |
+| Backend  | Express + better-sqlite3    |
+| Scraper  | Tampermonkey userscript     |
+| Styling  | Vanilla CSS (dark mode)     |

@@ -1,109 +1,206 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { Copy, Check } from 'lucide-react';
 
 export default function TampermonkeyScript() {
   const [copied, setCopied] = useState(false);
-  const appUrl = (import.meta as any).env.VITE_APP_URL || window.location.origin;
-
-  let hostname = 'localhost';
-  try {
-    hostname = new URL(appUrl).hostname;
-  } catch (e) {
-    console.error('Invalid appUrl:', appUrl);
-  }
 
   const scriptContent = `// ==UserScript==
-// @name         X Bookmark Sync to Local Markdown
+// @name         XMarks — Bookmark Sync + Article Extraction
 // @namespace    http://tampermonkey.net/
-// @version      1.0
-// @description  Sends scrolled bookmarks to a local Python server
+// @version      2.0
+// @description  Syncs X bookmarks to a local XMarks server with auto-scroll and link extraction
 // @match        *://x.com/*
 // @match        *://twitter.com/*
 // @grant        GM_xmlhttpRequest
-// @connect      ${hostname}
+// @connect      localhost
 // ==/UserScript==
 
 (function() {
     'use strict';
 
     let syncing = false;
-    let processedTweets = new Set();
+    let autoScrolling = false;
+    const processedTweets = new Set();
+    let scrollInterval = null;
 
-    // 1. Create a Floating Button on the screen
-    const btn = document.createElement('button');
-    btn.innerText = "🔴 Start Bookmark Sync";
-    btn.style.cssText = "position:fixed; bottom:20px; right:20px; z-index:9999; padding:15px 20px; background:#1DA1F2; color:white; border:none; border-radius:50px; cursor:pointer; font-weight:bold; box-shadow: 0 4px 6px rgba(0,0,0,0.3); font-family: sans-serif;";
-    document.body.appendChild(btn);
+    // ── Floating Buttons Container ───────────────────────────
+    const container = document.createElement('div');
+    container.style.cssText = \`
+        position: fixed; bottom: 20px; right: 20px; z-index: 9999;
+        display: flex; flex-direction: column; gap: 10px;
+        font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    \`;
+    document.body.appendChild(container);
 
-    // 2. Button Click Logic
-    btn.onclick = () => {
+    // ── Sync Button ──────────────────────────────────────────
+    const syncBtn = document.createElement('button');
+    syncBtn.innerText = "🔴 Start Sync";
+    syncBtn.style.cssText = \`
+        padding: 12px 20px; background: #6366f1; color: white;
+        border: none; border-radius: 50px; cursor: pointer;
+        font-weight: 700; font-size: 13px;
+        box-shadow: 0 4px 16px rgba(99,102,241,0.4);
+        transition: all 0.2s ease; min-width: 180px;
+    \`;
+    container.appendChild(syncBtn);
+
+    // ── Auto-Scroll Button ───────────────────────────────────
+    const scrollBtn = document.createElement('button');
+    scrollBtn.innerText = "⏬ Auto-Scroll";
+    scrollBtn.style.cssText = \`
+        padding: 12px 20px; background: #374151; color: white;
+        border: none; border-radius: 50px; cursor: pointer;
+        font-weight: 700; font-size: 13px;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+        transition: all 0.2s ease; min-width: 180px;
+    \`;
+    container.appendChild(scrollBtn);
+
+    // ── Status Counter ───────────────────────────────────────
+    const counter = document.createElement('div');
+    counter.style.cssText = \`
+        padding: 8px 16px; background: rgba(0,0,0,0.8); color: #a5b4fc;
+        border-radius: 50px; font-size: 12px; font-weight: 600;
+        text-align: center; backdrop-filter: blur(4px);
+    \`;
+    counter.innerText = "0 synced";
+    container.appendChild(counter);
+
+    // ── Sync Toggle ──────────────────────────────────────────
+    syncBtn.onclick = () => {
         syncing = !syncing;
         if (syncing) {
-            btn.innerText = "🟢 Syncing (Scroll Down)...";
-            btn.style.background = '#17bf63';
+            syncBtn.innerText = "🟢 Syncing...";
+            syncBtn.style.background = '#22c55e';
+            syncBtn.style.boxShadow = '0 4px 16px rgba(34,197,94,0.4)';
             startObserver();
         } else {
-            btn.innerText = "🔴 Start Bookmark Sync";
-            btn.style.background = '#1DA1F2';
+            syncBtn.innerText = "🔴 Start Sync";
+            syncBtn.style.background = '#6366f1';
+            syncBtn.style.boxShadow = '0 4px 16px rgba(99,102,241,0.4)';
         }
     };
 
-    // 3. The Scraping Engine
+    // ── Auto-Scroll Toggle ───────────────────────────────────
+    scrollBtn.onclick = () => {
+        autoScrolling = !autoScrolling;
+        if (autoScrolling) {
+            scrollBtn.innerText = "⏸️ Stop Scroll";
+            scrollBtn.style.background = '#f59e0b';
+            scrollBtn.style.boxShadow = '0 4px 16px rgba(245,158,11,0.4)';
+            startAutoScroll();
+        } else {
+            scrollBtn.innerText = "⏬ Auto-Scroll";
+            scrollBtn.style.background = '#374151';
+            scrollBtn.style.boxShadow = '0 4px 16px rgba(0,0,0,0.3)';
+            stopAutoScroll();
+        }
+    };
+
+    // ── Auto-Scroll Engine ───────────────────────────────────
+    function startAutoScroll() {
+        scrollInterval = setInterval(() => {
+            if (!autoScrolling) return;
+
+            // Check if we've reached the end (no more content loading)
+            const endMarker = document.querySelector('[data-testid="emptyState"]');
+            if (endMarker) {
+                autoScrolling = false;
+                scrollBtn.innerText = "✅ Done!";
+                scrollBtn.style.background = '#22c55e';
+                stopAutoScroll();
+                return;
+            }
+
+            window.scrollBy({ top: 400, behavior: 'smooth' });
+        }, 1500); // Scroll every 1.5s to let tweets load
+    }
+
+    function stopAutoScroll() {
+        if (scrollInterval) {
+            clearInterval(scrollInterval);
+            scrollInterval = null;
+        }
+    }
+
+    // ── Scraping Engine ──────────────────────────────────────
     function startObserver() {
-        // Check the page every 1 second
         setInterval(() => {
             if (!syncing) return;
-
-            // Only run if we are actually on the bookmarks page
             if (!window.location.pathname.includes('/bookmarks')) return;
 
-            // Find all visible tweets on screen
             const tweets = document.querySelectorAll('[data-testid="tweet"]');
-            
-            tweets.forEach(tweet => {
-                // Get Tweet Link and ID
-                const timeLink = tweet.querySelector('a[dir="auto"][href*="/status/"]');
-                if (!timeLink) return;
-                
-                const url = timeLink.href;
-                const tweetId = url.match(/\\/status\\/(\\d+)/)[1];
 
-                // Skip if we already sent this one to Python
+            tweets.forEach(tweet => {
+                const timeLink = tweet.querySelector('a[href*="/status/"]');
+                if (!timeLink) return;
+
+                const url = timeLink.href;
+                const match = url.match(/\\/status\\/(\\d+)/);
+                if (!match) return;
+                const tweetId = match[1];
+
                 if (processedTweets.has(tweetId)) return;
                 processedTweets.add(tweetId);
 
-                // Extract Author
-                const authorElement = tweet.querySelector('[data-testid="User-Name"]');
-                const authorText = authorElement ? authorElement.innerText.replace(/\\n/g, ' - ') : "Unknown Author";
-                
-                // Extract Text
-                const textElement = tweet.querySelector('[data-testid="tweetText"]');
-                const tweetText = textElement ? textElement.innerText : "";
+                // Author
+                const authorEl = tweet.querySelector('[data-testid="User-Name"]');
+                const author = authorEl ? authorEl.innerText.replace(/\\n/g, ' · ') : "Unknown";
 
-                // Extract Images (Upgrade small images to their full-size versions)
-                const mediaElements = tweet.querySelectorAll('[data-testid="tweetPhoto"] img');
-                const mediaUrls = Array.from(mediaElements).map(img => {
-                    return img.src.replace(/&name=small|&name=medium/, '&name=large');
-                });
+                // Text
+                const textEl = tweet.querySelector('[data-testid="tweetText"]');
+                const text = textEl ? textEl.innerText : "";
 
-                // 4. Send the data to your Local Python Server safely
+                // Media (upgrade to large)
+                const mediaEls = tweet.querySelectorAll('[data-testid="tweetPhoto"] img');
+                const media = Array.from(mediaEls).map(img =>
+                    img.src.replace(/&name=small|&name=medium/, '&name=large')
+                );
+
+                // ── Extract ALL links from the tweet ──────────
+                const tweetLinks = [];
+
+                // Links in tweet text
+                if (textEl) {
+                    const textAnchors = textEl.querySelectorAll('a[href]');
+                    textAnchors.forEach(a => {
+                        const href = a.href;
+                        if (href && !href.includes('x.com/hashtag') && !href.includes('twitter.com/hashtag')) {
+                            tweetLinks.push(href);
+                        }
+                    });
+                }
+
+                // Card links (article previews)
+                const cardLink = tweet.querySelector('[data-testid="card.wrapper"] a[href]');
+                if (cardLink && cardLink.href) {
+                    tweetLinks.push(cardLink.href);
+                }
+
+                // Deduplicate links
+                const uniqueLinks = [...new Set(tweetLinks)];
+
+                // Update counter
+                counter.innerText = processedTweets.size + " synced";
+
+                // Send to local server
                 GM_xmlhttpRequest({
                     method: "POST",
-                    url: "${appUrl}/api/bookmarks",
+                    url: "http://localhost:3001/api/bookmarks",
                     data: JSON.stringify({
                         id: tweetId,
                         url: url,
-                        author: authorText,
-                        text: tweetText,
-                        media: mediaUrls
+                        author: author,
+                        text: text,
+                        media: media,
+                        links: uniqueLinks
                     }),
                     headers: { "Content-Type": "application/json" },
-                    onload: function(response) {
-                        console.log("Locally Saved: " + tweetId);
-                    }
+                    onload: (res) => console.log("[XMarks] Saved:", tweetId, "| Links:", uniqueLinks.length),
+                    onerror: (err) => console.error("[XMarks] Error:", err)
                 });
             });
-        }, 1000); 
+        }, 1000);
     }
 })();`;
 
@@ -113,40 +210,78 @@ export default function TampermonkeyScript() {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch (err) {
-      console.error('Failed to copy text: ', err);
+      console.error('Failed to copy:', err);
     }
   };
 
   return (
-    <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-      <div className="px-6 py-5 border-b border-gray-200 flex justify-between items-center bg-gray-50">
-        <div>
-          <h3 className="text-lg font-medium text-gray-900">Tampermonkey Script</h3>
-          <p className="text-sm text-gray-500 mt-1">
-            Install this script in your browser to sync bookmarks automatically when you scroll.
-          </p>
+    <div className="setup-container">
+      <div className="setup-card">
+        {/* Header */}
+        <div className="setup-header">
+          <div className="setup-header-text">
+            <h3>Tampermonkey Userscript v2.0</h3>
+            <p>Syncs bookmarks <strong>+ extracts linked articles</strong> automatically. Includes auto-scroll.</p>
+          </div>
+          <button className="copy-btn" onClick={handleCopy}>
+            {copied ? (
+              <><Check size={14} /> Copied!</>
+            ) : (
+              <><Copy size={14} /> Copy Script</>
+            )}
+          </button>
         </div>
-        <button
-          onClick={handleCopy}
-          className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors"
-        >
-          {copied ? (
-            <>
-              <Check className="mr-2 h-4 w-4" />
-              Copied!
-            </>
-          ) : (
-            <>
-              <Copy className="mr-2 h-4 w-4" />
-              Copy Script
-            </>
-          )}
-        </button>
-      </div>
-      <div className="p-0 bg-gray-900 overflow-x-auto">
-        <pre className="text-sm text-gray-300 p-6 font-mono">
-          <code>{scriptContent}</code>
-        </pre>
+
+        {/* Code Block */}
+        <div className="setup-code">
+          <pre><code>{scriptContent}</code></pre>
+        </div>
+
+        {/* Instructions */}
+        <div className="setup-instructions">
+          <h4>How to Install</h4>
+          <ol className="setup-steps">
+            <li>
+              Install the <strong>Tampermonkey</strong> browser extension from{' '}
+              <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener noreferrer">
+                tampermonkey.net
+              </a>
+            </li>
+            <li>
+              Click the Tampermonkey icon → <strong>Create a new script</strong>
+            </li>
+            <li>
+              Delete the default template and <strong>paste the script above</strong>
+            </li>
+            <li>
+              Save with <strong>Ctrl+S</strong>
+            </li>
+            <li>
+              Go to{' '}
+              <a href="https://x.com/i/bookmarks" target="_blank" rel="noopener noreferrer">
+                x.com/i/bookmarks
+              </a>{' '}
+              while logged in
+            </li>
+            <li>
+              Click <strong>"🔴 Start Sync"</strong> to begin capturing bookmarks
+            </li>
+            <li>
+              Click <strong>"⏬ Auto-Scroll"</strong> to scroll automatically, or scroll manually
+            </li>
+            <li>
+              Articles linked in tweets are <strong>automatically extracted</strong> on the server
+            </li>
+          </ol>
+
+          <h4 style={{ marginTop: '1.5rem' }}>What's New in v2</h4>
+          <ul className="setup-steps">
+            <li><strong>Auto-Scroll</strong> — scrolls the page at a safe pace, pausing for content to load</li>
+            <li><strong>Link Extraction</strong> — captures all URLs in tweet text and card links</li>
+            <li><strong>Article Extraction</strong> — server follows links and extracts full article content</li>
+            <li><strong>Sync Counter</strong> — shows how many bookmarks have been captured</li>
+          </ul>
+        </div>
       </div>
     </div>
   );

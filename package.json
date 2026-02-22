@@ -6,7 +6,8 @@
     "scripts": {
         "dev": "concurrently \"tsx watch server.ts\" \"vite\"",
         "build": "vite build && tsc --project tsconfig.server.json",
-        "preview": "vite preview"
+        "preview": "vite preview",
+        "test": "tsx test/pipeline.test.ts"
     },
     "dependencies": {
         "@mozilla/readability": "^0.6.0",

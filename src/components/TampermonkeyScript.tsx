@@ -5,10 +5,10 @@ export default function TampermonkeyScript() {
   const [copied, setCopied] = useState(false);
 
   const scriptContent = `// ==UserScript==
-// @name         XMarks — Bookmark Sync + Article Extraction
+// @name         XMarks — Bookmark Sync v3
 // @namespace    http://tampermonkey.net/
-// @version      2.0
-// @description  Syncs X bookmarks to a local XMarks server with auto-scroll and link extraction
+// @version      3.0
+// @description  Syncs X bookmarks to local XMarks server — robust auto-scroll, text + link extraction
 // @match        *://x.com/*
 // @match        *://twitter.com/*
 // @grant        GM_xmlhttpRequest
@@ -22,47 +22,49 @@ export default function TampermonkeyScript() {
     let autoScrolling = false;
     const processedTweets = new Set();
     let scrollInterval = null;
+    let stuckCount = 0;
+    let lastScrollY = 0;
 
     // ── Floating Buttons Container ───────────────────────────
     const container = document.createElement('div');
-    container.style.cssText = \`
-        position: fixed; bottom: 20px; right: 20px; z-index: 9999;
+    container.style.cssText = \\\`
+        position: fixed; bottom: 20px; right: 20px; z-index: 99999;
         display: flex; flex-direction: column; gap: 10px;
         font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    \`;
+    \\\`;
     document.body.appendChild(container);
 
     // ── Sync Button ──────────────────────────────────────────
     const syncBtn = document.createElement('button');
     syncBtn.innerText = "🔴 Start Sync";
-    syncBtn.style.cssText = \`
+    syncBtn.style.cssText = \\\`
         padding: 12px 20px; background: #6366f1; color: white;
         border: none; border-radius: 50px; cursor: pointer;
         font-weight: 700; font-size: 13px;
         box-shadow: 0 4px 16px rgba(99,102,241,0.4);
         transition: all 0.2s ease; min-width: 180px;
-    \`;
+    \\\`;
     container.appendChild(syncBtn);
 
     // ── Auto-Scroll Button ───────────────────────────────────
     const scrollBtn = document.createElement('button');
     scrollBtn.innerText = "⏬ Auto-Scroll";
-    scrollBtn.style.cssText = \`
+    scrollBtn.style.cssText = \\\`
         padding: 12px 20px; background: #374151; color: white;
         border: none; border-radius: 50px; cursor: pointer;
         font-weight: 700; font-size: 13px;
         box-shadow: 0 4px 16px rgba(0,0,0,0.3);
         transition: all 0.2s ease; min-width: 180px;
-    \`;
+    \\\`;
     container.appendChild(scrollBtn);
 
     // ── Status Counter ───────────────────────────────────────
     const counter = document.createElement('div');
-    counter.style.cssText = \`
+    counter.style.cssText = \\\`
         padding: 8px 16px; background: rgba(0,0,0,0.8); color: #a5b4fc;
         border-radius: 50px; font-size: 12px; font-weight: 600;
         text-align: center; backdrop-filter: blur(4px);
-    \`;
+    \\\`;
     counter.innerText = "0 synced";
     container.appendChild(counter);
 
@@ -88,6 +90,8 @@ export default function TampermonkeyScript() {
             scrollBtn.innerText = "⏸️ Stop Scroll";
             scrollBtn.style.background = '#f59e0b';
             scrollBtn.style.boxShadow = '0 4px 16px rgba(245,158,11,0.4)';
+            stuckCount = 0;
+            lastScrollY = window.scrollY;
             startAutoScroll();
         } else {
             scrollBtn.innerText = "⏬ Auto-Scroll";
@@ -97,23 +101,48 @@ export default function TampermonkeyScript() {
         }
     };
 
-    // ── Auto-Scroll Engine ───────────────────────────────────
+    // ── Auto-Scroll Engine (robust) ──────────────────────────
+    // Key fixes:
+    // 1. Does NOT stop on videos — only stops after 15+ failed scroll attempts
+    // 2. Uses scrollY comparison to detect if we're actually moving
+    // 3. Pauses videos that might block scrolling
     function startAutoScroll() {
         scrollInterval = setInterval(() => {
             if (!autoScrolling) return;
 
-            // Check if we've reached the end (no more content loading)
-            const endMarker = document.querySelector('[data-testid="emptyState"]');
-            if (endMarker) {
-                autoScrolling = false;
-                scrollBtn.innerText = "✅ Done!";
-                scrollBtn.style.background = '#22c55e';
-                stopAutoScroll();
-                return;
-            }
+            // Pause any playing videos to prevent scroll blocking
+            const videos = document.querySelectorAll('video');
+            videos.forEach(v => { try { v.pause(); } catch(e) {} });
 
-            window.scrollBy({ top: 400, behavior: 'smooth' });
-        }, 1500); // Scroll every 1.5s to let tweets load
+            // Scroll down
+            window.scrollBy({ top: 600, behavior: 'smooth' });
+
+            // Check if we actually moved
+            setTimeout(() => {
+                const currentY = window.scrollY;
+                if (Math.abs(currentY - lastScrollY) < 50) {
+                    stuckCount++;
+                    counter.innerText = processedTweets.size + " synced (loading...)";
+
+                    // If stuck for 15+ cycles (22.5s), we've likely reached the end
+                    if (stuckCount >= 15) {
+                        autoScrolling = false;
+                        scrollBtn.innerText = "✅ Done!";
+                        scrollBtn.style.background = '#22c55e';
+                        counter.innerText = processedTweets.size + " synced (complete)";
+                        stopAutoScroll();
+                        return;
+                    }
+
+                    // Try a bigger scroll to get past sticky elements
+                    window.scrollBy({ top: 1200, behavior: 'instant' });
+                } else {
+                    stuckCount = 0; // Reset when we're moving
+                    counter.innerText = processedTweets.size + " synced";
+                }
+                lastScrollY = currentY;
+            }, 800);
+        }, 1500);
     }
 
     function stopAutoScroll() {
@@ -132,71 +161,123 @@ export default function TampermonkeyScript() {
             const tweets = document.querySelectorAll('[data-testid="tweet"]');
 
             tweets.forEach(tweet => {
-                const timeLink = tweet.querySelector('a[href*="/status/"]');
-                if (!timeLink) return;
+                // ── Get tweet ID ──────────────────────────────
+                const allLinks = tweet.querySelectorAll('a[href*="/status/"]');
+                let tweetUrl = null;
+                let tweetId = null;
 
-                const url = timeLink.href;
-                const match = url.match(/\\/status\\/(\\d+)/);
-                if (!match) return;
-                const tweetId = match[1];
+                for (const link of allLinks) {
+                    const href = link.href;
+                    const match = href.match(/\\/status\\/(\\d+)/);
+                    if (match) {
+                        tweetUrl = href;
+                        tweetId = match[1];
+                        break;
+                    }
+                }
 
+                if (!tweetId) return;
                 if (processedTweets.has(tweetId)) return;
                 processedTweets.add(tweetId);
 
-                // Author
+                // ── Author ────────────────────────────────────
                 const authorEl = tweet.querySelector('[data-testid="User-Name"]');
                 const author = authorEl ? authorEl.innerText.replace(/\\n/g, ' · ') : "Unknown";
 
-                // Text
-                const textEl = tweet.querySelector('[data-testid="tweetText"]');
-                const text = textEl ? textEl.innerText : "";
+                // ── Text (multiple fallback strategies) ───────
+                let text = "";
 
-                // Media (upgrade to large)
+                // Strategy 1: data-testid="tweetText"
+                const textEl = tweet.querySelector('[data-testid="tweetText"]');
+                if (textEl) {
+                    text = textEl.innerText || "";
+                }
+
+                // Strategy 2: If no text found, look for the main text div
+                // Some tweets (quoted, video-only with captions) use different containers
+                if (!text) {
+                    const altText = tweet.querySelector('[lang]');
+                    if (altText && altText.closest('[data-testid="tweet"]') === tweet) {
+                        text = altText.innerText || "";
+                    }
+                }
+
+                // Strategy 3: Get any visible text content in the tweet body
+                // Exclude author name area and timestamp
+                if (!text) {
+                    const tweetBody = tweet.querySelector('[data-testid="tweetText"], [data-testid="tweet"] > div > div > div:nth-child(2)');
+                    if (tweetBody) {
+                        text = tweetBody.innerText || "";
+                    }
+                }
+
+                // ── Media ─────────────────────────────────────
                 const mediaEls = tweet.querySelectorAll('[data-testid="tweetPhoto"] img');
                 const media = Array.from(mediaEls).map(img =>
                     img.src.replace(/&name=small|&name=medium/, '&name=large')
                 );
 
-                // ── Extract ALL links from the tweet ──────────
+                // Also capture video thumbnails
+                const videoEls = tweet.querySelectorAll('video');
+                videoEls.forEach(v => {
+                    if (v.poster) media.push(v.poster);
+                });
+
+                // ── Links (comprehensive extraction) ──────────
                 const tweetLinks = [];
 
-                // Links in tweet text
+                // Links inside tweet text
                 if (textEl) {
-                    const textAnchors = textEl.querySelectorAll('a[href]');
-                    textAnchors.forEach(a => {
+                    textEl.querySelectorAll('a[href]').forEach(a => {
                         const href = a.href;
-                        if (href && !href.includes('x.com/hashtag') && !href.includes('twitter.com/hashtag')) {
+                        if (href && !href.includes('/hashtag/') && !href.match(/x\\.com\\/\\w+$/)) {
                             tweetLinks.push(href);
                         }
                     });
                 }
 
-                // Card links (article previews)
-                const cardLink = tweet.querySelector('[data-testid="card.wrapper"] a[href]');
-                if (cardLink && cardLink.href) {
-                    tweetLinks.push(cardLink.href);
+                // Card links (article preview cards)
+                const cardLinks = tweet.querySelectorAll('[data-testid="card.wrapper"] a[href]');
+                cardLinks.forEach(a => {
+                    if (a.href) tweetLinks.push(a.href);
+                });
+
+                // Links in quoted tweets too
+                const quotedTweet = tweet.querySelector('[data-testid="quoteTweet"]');
+                if (quotedTweet) {
+                    quotedTweet.querySelectorAll('a[href]').forEach(a => {
+                        const href = a.href;
+                        if (href && href.startsWith('http') && !href.includes('/hashtag/')) {
+                            tweetLinks.push(href);
+                        }
+                    });
                 }
 
-                // Deduplicate links
+                // All other external links in the tweet
+                tweet.querySelectorAll('a[href^="https://t.co"]').forEach(a => {
+                    tweetLinks.push(a.href);
+                });
+
+                // Deduplicate
                 const uniqueLinks = [...new Set(tweetLinks)];
 
-                // Update counter
+                // ── Update counter ────────────────────────────
                 counter.innerText = processedTweets.size + " synced";
 
-                // Send to local server
+                // ── Send to server ────────────────────────────
                 GM_xmlhttpRequest({
                     method: "POST",
                     url: "http://localhost:3001/api/bookmarks",
                     data: JSON.stringify({
                         id: tweetId,
-                        url: url,
+                        url: tweetUrl,
                         author: author,
                         text: text,
                         media: media,
                         links: uniqueLinks
                     }),
                     headers: { "Content-Type": "application/json" },
-                    onload: (res) => console.log("[XMarks] Saved:", tweetId, "| Links:", uniqueLinks.length),
+                    onload: (res) => console.log("[XMarks] Saved:", tweetId, "| Text:", text.length + "ch", "| Links:", uniqueLinks.length),
                     onerror: (err) => console.error("[XMarks] Error:", err)
                 });
             });
@@ -220,8 +301,8 @@ export default function TampermonkeyScript() {
         {/* Header */}
         <div className="setup-header">
           <div className="setup-header-text">
-            <h3>Tampermonkey Userscript v2.0</h3>
-            <p>Syncs bookmarks <strong>+ extracts linked articles</strong> automatically. Includes auto-scroll.</p>
+            <h3>Tampermonkey Userscript v3.0</h3>
+            <p>Robust auto-scroll, <strong>full text + article extraction</strong>, video-aware scrolling.</p>
           </div>
           <button className="copy-btn" onClick={handleCopy}>
             {copied ? (
@@ -242,16 +323,16 @@ export default function TampermonkeyScript() {
           <h4>How to Install</h4>
           <ol className="setup-steps">
             <li>
-              Install the <strong>Tampermonkey</strong> browser extension from{' '}
+              Install <strong>Tampermonkey</strong> from{' '}
               <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener noreferrer">
                 tampermonkey.net
               </a>
             </li>
             <li>
-              Click the Tampermonkey icon → <strong>Create a new script</strong>
+              Click Tampermonkey icon → <strong>Create a new script</strong>
             </li>
             <li>
-              Delete the default template and <strong>paste the script above</strong>
+              Delete the template and <strong>paste the script above</strong>
             </li>
             <li>
               Save with <strong>Ctrl+S</strong>
@@ -260,26 +341,22 @@ export default function TampermonkeyScript() {
               Go to{' '}
               <a href="https://x.com/i/bookmarks" target="_blank" rel="noopener noreferrer">
                 x.com/i/bookmarks
-              </a>{' '}
-              while logged in
+              </a>
             </li>
             <li>
-              Click <strong>"🔴 Start Sync"</strong> to begin capturing bookmarks
+              Click <strong>"🔴 Start Sync"</strong> to begin
             </li>
             <li>
-              Click <strong>"⏬ Auto-Scroll"</strong> to scroll automatically, or scroll manually
-            </li>
-            <li>
-              Articles linked in tweets are <strong>automatically extracted</strong> on the server
+              Click <strong>"⏬ Auto-Scroll"</strong> — it will scroll past videos without stopping
             </li>
           </ol>
 
-          <h4 style={{ marginTop: '1.5rem' }}>What's New in v2</h4>
+          <h4 style={{ marginTop: '1.5rem' }}>What's Fixed in v3</h4>
           <ul className="setup-steps">
-            <li><strong>Auto-Scroll</strong> — scrolls the page at a safe pace, pausing for content to load</li>
-            <li><strong>Link Extraction</strong> — captures all URLs in tweet text and card links</li>
-            <li><strong>Article Extraction</strong> — server follows links and extracts full article content</li>
-            <li><strong>Sync Counter</strong> — shows how many bookmarks have been captured</li>
+            <li><strong>Auto-scroll no longer stops on videos</strong> — pauses video players and uses scroll-position tracking instead of DOM markers</li>
+            <li><strong>Better text extraction</strong> — multiple fallback strategies for tweets with unusual DOM structures</li>
+            <li><strong>Deeper link capture</strong> — extracts links from quoted tweets, card wrappers, and t.co redirects</li>
+            <li><strong>Stuck detection</strong> — if scroll position doesn't change for 22.5s, marks as complete</li>
           </ul>
         </div>
       </div>

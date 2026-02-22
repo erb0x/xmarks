@@ -134,7 +134,7 @@ export default function TampermonkeyScript() {
     '    function startObserver() {',
     '        setInterval(function() {',
     '            if (!syncing) return;',
-    '            if (window.location.pathname.indexOf("/bookmarks") === -1) return;',
+    '            // Works on any X page — timeline, bookmarks, search, individual tweets',
     '',
     '            var tweets = document.querySelectorAll(\'[data-testid="tweet"]\');',
     '',

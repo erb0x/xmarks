@@ -111,6 +111,56 @@ const PORT = 3001;
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
+// Serve locally downloaded media
+const mediaDir = path.join(dataDir, 'media');
+if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir, { recursive: true });
+app.use('/media', express.static(mediaDir));
+
+// ─── Image Download Helper ────────────────────────────────────
+async function downloadMediaFile(url: string, bookmarkId: string): Promise<string | null> {
+  try {
+    const tweetDir = path.join(mediaDir, bookmarkId);
+    if (!fs.existsSync(tweetDir)) fs.mkdirSync(tweetDir, { recursive: true });
+
+    // Extract filename from URL
+    const urlObj = new URL(url);
+    let filename = path.basename(urlObj.pathname);
+    if (!filename || filename === '/') {
+      filename = `img_${Date.now()}.jpg`;
+    }
+    // Clean up query params from filename
+    filename = filename.replace(/[?#].*$/, '');
+
+    const filePath = path.join(tweetDir, filename);
+
+    // Skip if already downloaded
+    if (fs.existsSync(filePath)) {
+      return `/media/${bookmarkId}/${filename}`;
+    }
+
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      },
+      signal: AbortSignal.timeout(30000),
+    });
+
+    if (!response.ok) {
+      console.error(`[Media] Failed to download ${url}: ${response.status}`);
+      return null;
+    }
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+    fs.writeFileSync(filePath, buffer);
+    console.log(`[Media] Downloaded: ${filename} (${Math.round(buffer.length / 1024)}KB)`);
+
+    return `/media/${bookmarkId}/${filename}`;
+  } catch (err) {
+    console.error(`[Media] Error downloading ${url}:`, err);
+    return null;
+  }
+}
+
 // ─── Helpers ──────────────────────────────────────────────────
 
 /** Enrich bookmarks with their media, articles, and transcripts */
@@ -167,56 +217,65 @@ app.post('/api/bookmarks', async (req, res) => {
   }
 
   try {
+    // UPSERT: insert new, or update text/author if re-synced
     const stmt = db.prepare(
-      'INSERT OR IGNORE INTO bookmarks (id, url, author, text) VALUES (?, ?, ?, ?)'
+      `INSERT INTO bookmarks (id, url, author, text) VALUES (?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         text = CASE WHEN excluded.text != '' AND excluded.text IS NOT NULL THEN excluded.text ELSE bookmarks.text END,
+         author = CASE WHEN excluded.author != '' AND excluded.author IS NOT NULL THEN excluded.author ELSE bookmarks.author END`
     );
-    const info = stmt.run(id, url, author, text);
+    stmt.run(id, url, author, text);
 
-    if (info.changes > 0) {
-      // Save media
-      if (media && Array.isArray(media)) {
+    // Save media (with local download) — only if we don't already have media for this bookmark
+    const existingMedia = db.prepare('SELECT COUNT(*) as count FROM media WHERE bookmark_id = ?').get(id) as { count: number };
+    if (media && Array.isArray(media) && media.length > 0 && existingMedia.count === 0) {
+      // Download images in background, save to DB
+      (async () => {
         const mediaStmt = db.prepare('INSERT INTO media (bookmark_id, url) VALUES (?, ?)');
-        const insertMedia = db.transaction((mediaUrls: string[]) => {
-          for (const mediaUrl of mediaUrls) {
-            mediaStmt.run(id, mediaUrl);
-          }
-        });
-        insertMedia(media);
-      }
-
-      // Process links and extract articles (async, don't block response)
-      if (tweetLinks && Array.isArray(tweetLinks) && tweetLinks.length > 0) {
-        processLinks(tweetLinks).then(({ links, articles }) => {
-          // Save links
-          const linkStmt = db.prepare(
-            'INSERT INTO links (bookmark_id, original_url, resolved_url, is_article) VALUES (?, ?, ?, ?)'
-          );
-          for (const link of links) {
-            linkStmt.run(id, link.originalUrl, link.resolvedUrl, link.isArticle ? 1 : 0);
-          }
-
-          // Save articles
-          const articleStmt = db.prepare(
-            `INSERT INTO articles (bookmark_id, url, title, author, content, content_md, excerpt, site_name)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-          );
-          for (const article of articles) {
-            articleStmt.run(
-              id, article.url, article.title, article.author,
-              article.content, article.contentMd, article.excerpt, article.siteName
-            );
-          }
-
-          if (articles.length > 0) {
-            console.log(`[XMarks] Extracted ${articles.length} article(s) for tweet ${id}`);
-          }
-        }).catch(err => {
-          console.error(`[XMarks] Article extraction failed for ${id}:`, err);
-        });
-      }
+        for (const mediaUrl of media) {
+          const localPath = await downloadMediaFile(mediaUrl, id);
+          // Store both: local path (priority) or original URL (fallback)
+          mediaStmt.run(id, localPath || mediaUrl);
+        }
+        console.log(`[XMarks] Saved ${media.length} media file(s) for tweet ${id}`);
+      })().catch(err => console.error(`[Media] Error for ${id}:`, err));
     }
 
-    res.json({ status: 'success', saved: info.changes > 0 });
+    // Process links and extract articles — only if we don't already have articles for this bookmark
+    const existingArticles = db.prepare('SELECT COUNT(*) as count FROM articles WHERE bookmark_id = ?').get(id) as { count: number };
+    if (tweetLinks && Array.isArray(tweetLinks) && tweetLinks.length > 0 && existingArticles.count === 0) {
+      processLinks(tweetLinks).then(({ links, articles }) => {
+        // Clear old links for this bookmark and re-save
+        db.prepare('DELETE FROM links WHERE bookmark_id = ?').run(id);
+
+        const linkStmt = db.prepare(
+          'INSERT INTO links (bookmark_id, original_url, resolved_url, is_article) VALUES (?, ?, ?, ?)'
+        );
+        for (const link of links) {
+          linkStmt.run(id, link.originalUrl, link.resolvedUrl, link.isArticle ? 1 : 0);
+        }
+
+        // Save articles
+        const articleStmt = db.prepare(
+          `INSERT INTO articles (bookmark_id, url, title, author, content, content_md, excerpt, site_name)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        );
+        for (const article of articles) {
+          articleStmt.run(
+            id, article.url, article.title, article.author,
+            article.content, article.contentMd, article.excerpt, article.siteName
+          );
+        }
+
+        if (articles.length > 0) {
+          console.log(`[XMarks] Extracted ${articles.length} article(s) for tweet ${id}`);
+        }
+      }).catch(err => {
+        console.error(`[XMarks] Article extraction failed for ${id}:`, err);
+      });
+    }
+
+    res.json({ status: 'success', saved: true });
   } catch (error) {
     console.error('Error saving bookmark:', error);
     res.status(500).json({ error: 'Failed to save bookmark' });

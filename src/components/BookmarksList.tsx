@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import {
   ExternalLink, Trash2, Image as ImageIcon, Clock,
-  ChevronDown, ChevronUp, AlertCircle, FileText, Globe
+  ChevronDown, ChevronUp, AlertCircle, FileText, Globe, Video
 } from 'lucide-react';
 
 interface Article {
@@ -23,6 +23,7 @@ interface Bookmark {
   saved_at: string;
   media: string[];
   articles: Article[];
+  transcripts: Array<{ video_url: string; transcript: string }>;
 }
 
 interface Props {
@@ -36,6 +37,7 @@ export default function BookmarksList({ searchQuery, refreshKey }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const [expandedArticles, setExpandedArticles] = useState<Set<string>>(new Set());
+  const [transcribingIds, setTranscribingIds] = useState<Set<string>>(new Set());
 
   const fetchBookmarks = useCallback(async () => {
     try {
@@ -98,6 +100,35 @@ export default function BookmarksList({ searchQuery, refreshKey }: Props) {
       next.has(key) ? next.delete(key) : next.add(key);
       return next;
     });
+  };
+
+  const handleTranscribe = async (id: string, videoUrl: string) => {
+    if (transcribingIds.has(id)) return;
+
+    setTranscribingIds((prev) => new Set(prev).add(id));
+    try {
+      const response = await fetch(`/api/bookmarks/${id}/transcribe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ videoUrl }),
+      });
+
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.details || 'Transcription failed');
+      }
+
+      await fetchBookmarks(); // Refresh to get the transcript
+    } catch (err) {
+      console.error('Failed to transcribe:', err);
+      alert(err instanceof Error ? err.message : 'Transcription failed');
+    } finally {
+      setTranscribingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    }
   };
 
   // ─── Loading State ─────────────────────────────────
@@ -203,6 +234,33 @@ export default function BookmarksList({ searchQuery, refreshKey }: Props) {
                         </div>
                       ))}
                     </div>
+                  </div>
+                )}
+
+                {/* Transcription Button */}
+                {bookmark.media && bookmark.media.some(url => url.includes('video') || url.includes('.mp4')) && (
+                  <div className="transcription-trigger">
+                    {bookmark.transcripts && bookmark.transcripts.length > 0 ? (
+                      <div className="transcript-panel">
+                        <div className="transcript-header">
+                          <Video size={12} />
+                          <span>Transcript</span>
+                        </div>
+                        <p className="transcript-text">{bookmark.transcripts[0].transcript}</p>
+                      </div>
+                    ) : (
+                      <button
+                        className="btn-secondary btn-sm"
+                        onClick={() => handleTranscribe(bookmark.id, bookmark.media.find(url => url.includes('video') || url.includes('.mp4')) || bookmark.media[0])}
+                        disabled={transcribingIds.has(bookmark.id)}
+                      >
+                        {transcribingIds.has(bookmark.id) ? (
+                          <><div className="spinner spinner-xs" /> Transcribing...</>
+                        ) : (
+                          <><Video size={14} /> Transcribe Video</>
+                        )}
+                      </button>
+                    )}
                   </div>
                 )}
 

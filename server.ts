@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import fs from 'fs';
 import { processLinks } from './lib/articleExtractor.js';
 import { exportBookmarks } from './lib/exporter.js';
+import { TranscriptionService } from './lib/transcriptionService.js';
 
 // ─── Path Setup ───────────────────────────────────────────────
 const __filename = fileURLToPath(import.meta.url);
@@ -115,6 +116,9 @@ app.use(express.json({ limit: '50mb' }));
 const mediaDir = path.join(dataDir, 'media');
 if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir, { recursive: true });
 app.use('/media', express.static(mediaDir));
+
+// ─── Transcription Service ────────────────────────────────────
+const transcriptionService = new TranscriptionService(dataDir);
 
 // ─── Image Download Helper ────────────────────────────────────
 const MIME_TO_EXT: Record<string, string> = {
@@ -357,6 +361,39 @@ app.get('/api/stats', (_req, res) => {
   }
 });
 
+// ─── GET /api/settings ───────────────────────────────────────
+app.get('/api/settings', async (_req, res) => {
+  try {
+    const hasOpenAI = fs.existsSync('c:\\Users\\mendj\\keys\\openai_whisper');
+
+    // Check for yt-dlp and ffmpeg by seeing if they return help
+    const checkCommand = async (cmd: string) => {
+      try {
+        const { promisify } = await import('util');
+        const { exec } = await import('child_process');
+        const execPromise = promisify(exec);
+        await execPromise(`${cmd} --version`);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    const hasYtDlp = await checkCommand('yt-dlp');
+    const hasFfmpeg = await checkCommand('ffmpeg');
+
+    res.json({
+      openaiKeyFound: hasOpenAI,
+      ytDlpFound: hasYtDlp,
+      ffmpegFound: hasFfmpeg,
+      keyPath: 'c:\\Users\\mendj\\keys\\openai_whisper'
+    });
+  } catch (error) {
+    console.error('Error fetching settings:', error);
+    res.status(500).json({ error: 'Failed to fetch settings' });
+  }
+});
+
 // ─── DELETE /api/bookmarks/all ───────────────────────────────
 app.delete('/api/bookmarks/all', (_req, res) => {
   try {
@@ -403,6 +440,36 @@ app.post('/api/export', async (_req, res) => {
   } catch (error) {
     console.error('Error exporting:', error);
     res.status(500).json({ error: 'Failed to export bookmarks' });
+  }
+});
+
+// ─── POST /api/bookmarks/:id/transcribe ──────────────────────
+app.post('/api/bookmarks/:id/transcribe', async (req, res) => {
+  const { id } = req.params;
+  const { videoUrl } = req.body;
+
+  if (!videoUrl) {
+    return res.status(400).json({ error: 'Missing videoUrl' });
+  }
+
+  try {
+    console.log(`[XMarks] Triggering transcription for bookmark ${id}...`);
+    const result = await transcriptionService.transcribe(videoUrl, id);
+
+    // Save to database
+    db.prepare(`
+      INSERT INTO transcripts (bookmark_id, video_url, transcript)
+      VALUES (?, ?, ?)
+    `).run(id, result.videoUrl, result.transcript);
+
+    res.json({
+      status: 'success',
+      transcript: result.transcript,
+      strategy: result.strategy
+    });
+  } catch (error) {
+    console.error(`[XMarks] Transcription failed for ${id}:`, error);
+    res.status(500).json({ error: 'Transcription failed', details: (error as Error).message });
   }
 });
 

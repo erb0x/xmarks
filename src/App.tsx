@@ -2,8 +2,9 @@ import { useState, useEffect } from 'react';
 import { Bookmark, Search, Settings, BarChart3, FileText, Download, Trash2 } from 'lucide-react';
 import BookmarksList from './components/BookmarksList';
 import TampermonkeyScript from './components/TampermonkeyScript';
+import SettingsTab from './components/SettingsTab';
 
-type Tab = 'bookmarks' | 'setup';
+type Tab = 'bookmarks' | 'setup' | 'settings';
 
 interface Stats {
     totalBookmarks: number;
@@ -125,6 +126,13 @@ export default function App() {
                         <Settings size={16} />
                         Setup
                     </button>
+                    <button
+                        className={`tab-btn ${activeTab === 'settings' ? 'active' : ''}`}
+                        onClick={() => setActiveTab('settings')}
+                    >
+                        <Settings size={16} />
+                        Settings
+                    </button>
                 </div>
             </nav>
 
@@ -148,6 +156,7 @@ export default function App() {
                     </>
                 )}
                 {activeTab === 'setup' && <TampermonkeyScript />}
+                {activeTab === 'settings' && <SettingsTab />}
             </main>
         </div>
     );

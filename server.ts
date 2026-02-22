@@ -117,6 +117,12 @@ if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir, { recursive: true });
 app.use('/media', express.static(mediaDir));
 
 // ─── Image Download Helper ────────────────────────────────────
+const MIME_TO_EXT: Record<string, string> = {
+  'image/jpeg': '.jpg', 'image/png': '.png', 'image/gif': '.gif',
+  'image/webp': '.webp', 'image/svg+xml': '.svg',
+  'video/mp4': '.mp4', 'video/webm': '.webm',
+};
+
 async function downloadMediaFile(url: string, bookmarkId: string): Promise<string | null> {
   try {
     const tweetDir = path.join(mediaDir, bookmarkId);
@@ -126,17 +132,10 @@ async function downloadMediaFile(url: string, bookmarkId: string): Promise<strin
     const urlObj = new URL(url);
     let filename = path.basename(urlObj.pathname);
     if (!filename || filename === '/') {
-      filename = `img_${Date.now()}.jpg`;
+      filename = `img_${Date.now()}`;
     }
     // Clean up query params from filename
     filename = filename.replace(/[?#].*$/, '');
-
-    const filePath = path.join(tweetDir, filename);
-
-    // Skip if already downloaded
-    if (fs.existsSync(filePath)) {
-      return `/media/${bookmarkId}/${filename}`;
-    }
 
     const response = await fetch(url, {
       headers: {
@@ -148,6 +147,21 @@ async function downloadMediaFile(url: string, bookmarkId: string): Promise<strin
     if (!response.ok) {
       console.error(`[Media] Failed to download ${url}: ${response.status}`);
       return null;
+    }
+
+    // Add extension from Content-Type if filename has none
+    const ext = path.extname(filename);
+    if (!ext) {
+      const contentType = response.headers.get('content-type')?.split(';')[0]?.trim() || '';
+      const detectedExt = MIME_TO_EXT[contentType] || '.jpg';
+      filename += detectedExt;
+    }
+
+    const filePath = path.join(tweetDir, filename);
+
+    // Skip if already downloaded
+    if (fs.existsSync(filePath)) {
+      return `/media/${bookmarkId}/${filename}`;
     }
 
     const buffer = Buffer.from(await response.arrayBuffer());
@@ -225,6 +239,9 @@ app.post('/api/bookmarks', async (req, res) => {
          author = CASE WHEN excluded.author != '' AND excluded.author IS NOT NULL THEN excluded.author ELSE bookmarks.author END`
     );
     stmt.run(id, url, author, text);
+    const logMsg = `[XMarks] POST bookmark ${id} | text: ${(text || '').length}ch | media: ${media?.length || 0} | links: ${tweetLinks?.length || 0}\n`;
+    fs.appendFileSync(path.join(dataDir, 'server.log'), logMsg);
+    console.log(logMsg);
 
     // Save media (with local download) — only if we don't already have media for this bookmark
     const existingMedia = db.prepare('SELECT COUNT(*) as count FROM media WHERE bookmark_id = ?').get(id) as { count: number };

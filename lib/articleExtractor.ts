@@ -8,6 +8,26 @@ const turndown = new TurndownService({
     bulletListMarker: '-',
 });
 
+const FETCH_TIMEOUT_MS = 15000;
+const RESOLVE_RETRIES = 2;
+const EXTRACT_RETRIES = 2;
+const RETRY_DELAY_MS = 500;
+
+async function withRetry<T>(fn: () => Promise<T>, retries: number): Promise<T> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+        try {
+            return await fn();
+        } catch (err) {
+            lastError = err;
+            if (attempt < retries) {
+                await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+            }
+        }
+    }
+    throw lastError;
+}
+
 export interface ExtractedArticle {
     url: string;
     title: string;
@@ -18,29 +38,33 @@ export interface ExtractedArticle {
     siteName: string | null;
 }
 
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
 /**
  * Resolve a t.co (or other) shortened URL to the final destination.
+ * Retries up to RESOLVE_RETRIES times on failure.
  */
 export async function resolveUrl(shortUrl: string): Promise<string> {
-    try {
+    const tryHead = async (): Promise<string> => {
         const response = await fetch(shortUrl, {
             method: 'HEAD',
             redirect: 'follow',
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            },
+            signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
         });
         return response.url || shortUrl;
+    };
+    const tryGet = async (): Promise<string> => {
+        const response = await fetch(shortUrl, {
+            redirect: 'follow',
+            signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        });
+        return response.url || shortUrl;
+    };
+    try {
+        return await withRetry(tryHead, RESOLVE_RETRIES);
     } catch {
-        // If HEAD fails, try GET
         try {
-            const response = await fetch(shortUrl, {
-                redirect: 'follow',
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                },
-            });
-            return response.url || shortUrl;
+            return await withRetry(tryGet, RESOLVE_RETRIES);
         } catch {
             return shortUrl;
         }
@@ -55,9 +79,9 @@ export function isLikelyArticle(url: string): boolean {
     const host = parsed.hostname.toLowerCase();
     const path = parsed.pathname.toLowerCase();
 
-    // Skip social media, image, and video hosts
+    // Skip shorteners and social media (t.co never redirects to final URL server-side, so skip to avoid wasted extraction)
     const skipHosts = [
-        'x.com', 'twitter.com', 'pic.twitter.com',
+        't.co', 'tw.co', 'x.com', 'twitter.com', 'pic.twitter.com',
         'youtube.com', 'youtu.be', 'tiktok.com',
         'instagram.com', 'facebook.com',
         'pbs.twimg.com', 'video.twimg.com',
@@ -74,17 +98,18 @@ export function isLikelyArticle(url: string): boolean {
 
 /**
  * Fetch a URL and extract the article content using Readability.
+ * Retries up to EXTRACT_RETRIES times on fetch failure.
  */
 export async function extractArticle(url: string): Promise<ExtractedArticle | null> {
-    try {
+    const fetchAndParse = async (): Promise<ExtractedArticle | null> => {
         const response = await fetch(url, {
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'User-Agent': UA,
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.9',
             },
             redirect: 'follow',
-            signal: AbortSignal.timeout(15000), // 15s timeout
+            signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
         });
 
         const contentType = response.headers.get('content-type') || '';
@@ -98,11 +123,10 @@ export async function extractArticle(url: string): Promise<ExtractedArticle | nu
         const article = reader.parse();
 
         if (!article || !article.content || article.content.length < 100) {
-            return null; // Not a real article
+            return null;
         }
 
         const markdown = turndown.turndown(article.content);
-
         return {
             url,
             title: article.title || 'Untitled',
@@ -112,6 +136,10 @@ export async function extractArticle(url: string): Promise<ExtractedArticle | nu
             excerpt: article.excerpt || null,
             siteName: article.siteName || null,
         };
+    };
+
+    try {
+        return await withRetry(fetchAndParse, EXTRACT_RETRIES);
     } catch (error) {
         console.error(`[ArticleExtractor] Failed to extract from ${url}:`, error);
         return null;
@@ -127,6 +155,7 @@ export async function processLinks(urls: string[]): Promise<{
 }> {
     const links: Array<{ originalUrl: string; resolvedUrl: string; isArticle: boolean }> = [];
     const articles: ExtractedArticle[] = [];
+    const steps: Array<{ resolved: string; likely: boolean; extracted: boolean }> = [];
 
     for (const originalUrl of urls) {
         try {
@@ -139,17 +168,22 @@ export async function processLinks(urls: string[]): Promise<{
                 isArticle: false, // Will update if extraction succeeds
             });
 
+            let extracted = false;
             if (likelyArticle) {
                 const article = await extractArticle(resolvedUrl);
                 if (article) {
                     articles.push(article);
-                    // Mark this link as an article
                     links[links.length - 1].isArticle = true;
+                    extracted = true;
                 }
+            }
+            if (steps.length < 5) {
+                steps.push({ resolved: resolvedUrl.slice(0, 90), likely: likelyArticle, extracted });
             }
         } catch (error) {
             console.error(`[ArticleExtractor] Error processing ${originalUrl}:`, error);
             links.push({ originalUrl, resolvedUrl: originalUrl, isArticle: false });
+            if (steps.length < 5) steps.push({ resolved: String((error as Error)?.message).slice(0, 90), likely: false, extracted: false });
         }
     }
 

@@ -38,6 +38,11 @@ export default function BookmarksList({ searchQuery, refreshKey }: Props) {
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const [expandedArticles, setExpandedArticles] = useState<Set<string>>(new Set());
   const [transcribingIds, setTranscribingIds] = useState<Set<string>>(new Set());
+  const [attachArticleId, setAttachArticleId] = useState<string | null>(null);
+  const [attachUrl, setAttachUrl] = useState('');
+  const [attachRawMarkdown, setAttachRawMarkdown] = useState('');
+  const [attachSubmitting, setAttachSubmitting] = useState(false);
+  const [attachError, setAttachError] = useState<string | null>(null);
 
   const fetchBookmarks = useCallback(async () => {
     try {
@@ -100,6 +105,32 @@ export default function BookmarksList({ searchQuery, refreshKey }: Props) {
       next.has(key) ? next.delete(key) : next.add(key);
       return next;
     });
+  };
+
+  const handleAttachArticle = async (id: string, url: string, rawMarkdown: string) => {
+    if (!url.trim() && !rawMarkdown.trim()) return;
+    setAttachSubmitting(true);
+    setAttachError(null);
+    try {
+      const body: { url?: string; rawMarkdown?: string } = {};
+      if (url.trim()) body.url = url.trim();
+      if (rawMarkdown.trim()) body.rawMarkdown = rawMarkdown.trim();
+      const response = await fetch(`/api/bookmarks/${id}/article`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to attach article');
+      }
+      setAttachArticleId(null);
+      await fetchBookmarks();
+    } catch (err) {
+      setAttachError(err instanceof Error ? err.message : 'Failed to attach article');
+    } finally {
+      setAttachSubmitting(false);
+    }
   };
 
   const handleTranscribe = async (id: string, videoUrl: string) => {
@@ -263,6 +294,58 @@ export default function BookmarksList({ searchQuery, refreshKey }: Props) {
                     )}
                   </div>
                 )}
+
+                {/* Attach full article */}
+                <div className="attach-article-section">
+                  <button
+                    type="button"
+                    className="attach-article-toggle"
+                    onClick={() => {
+                      setAttachArticleId((prev) => (prev === bookmark.id ? null : bookmark.id));
+                      setAttachError(null);
+                      if (attachArticleId !== bookmark.id) {
+                        setAttachUrl('');
+                        setAttachRawMarkdown('');
+                      }
+                    }}
+                  >
+                    <FileText size={12} />
+                    {attachArticleId === bookmark.id ? 'Hide' : 'Attach full article'}
+                  </button>
+                  {attachArticleId === bookmark.id && (
+                    <div className="attach-article-form">
+                      <label>
+                        <span>Article URL</span>
+                        <input
+                          type="url"
+                          placeholder="https://..."
+                          value={attachUrl}
+                          onChange={(e) => setAttachUrl(e.target.value)}
+                          disabled={attachSubmitting}
+                        />
+                      </label>
+                      <label>
+                        <span>Or paste full text / markdown</span>
+                        <textarea
+                          placeholder="Paste the full article text or markdown..."
+                          value={attachRawMarkdown}
+                          onChange={(e) => setAttachRawMarkdown(e.target.value)}
+                          rows={6}
+                          disabled={attachSubmitting}
+                        />
+                      </label>
+                      {attachError && <p className="attach-article-error">{attachError}</p>}
+                      <button
+                        type="button"
+                        className="btn-primary btn-sm"
+                        disabled={attachSubmitting || (!attachUrl.trim() && !attachRawMarkdown.trim())}
+                        onClick={() => handleAttachArticle(bookmark.id, attachUrl, attachRawMarkdown)}
+                      >
+                        {attachSubmitting ? 'Saving...' : 'Save article'}
+                      </button>
+                    </div>
+                  )}
+                </div>
 
                 {/* Articles */}
                 {bookmark.articles && bookmark.articles.length > 0 && (

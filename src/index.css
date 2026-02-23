@@ -782,6 +782,75 @@ a:hover {
 }
 
 /* ============================================
+   Attach full article
+   ============================================ */
+
+.attach-article-section {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+
+.attach-article-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  font-size: 0.75rem;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.attach-article-toggle:hover {
+  background: rgba(99, 102, 241, 0.08);
+  border-color: var(--accent);
+}
+
+.attach-article-form {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.attach-article-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.attach-article-form label span {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.attach-article-form input,
+.attach-article-form textarea {
+  padding: 8px 10px;
+  font-size: 0.8rem;
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+}
+
+.attach-article-form textarea {
+  resize: vertical;
+  min-height: 80px;
+}
+
+.attach-article-error {
+  font-size: 0.78rem;
+  color: var(--danger, #ef4444);
+  margin: 0;
+}
+
+/* ============================================
    Article Cards
    ============================================ */
 
@@ -885,8 +954,8 @@ a:hover {
   font-size: 0.8rem;
   color: var(--text-secondary);
   line-height: 1.7;
-  max-height: 400px;
-  overflow-y: auto;
+  max-height: none;
+  overflow-y: visible;
   padding-right: 8px;
 }
 

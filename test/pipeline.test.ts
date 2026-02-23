@@ -1,13 +1,15 @@
 /**
- * XMarks Test Harness
- * 
- * Tests the full pipeline: bookmark saving, article extraction, 
+ * XMarks Integration Test Harness
+ *
+ * Tests the full pipeline: bookmark saving, article extraction,
  * link resolution, and database consistency.
- * 
+ * Requires server running on port 3001 (or SERVER_URL env).
+ *
  * Run: npx tsx test/pipeline.test.ts
+ * Or: npm run test:integration
  */
 
-const API = 'http://localhost:3001';
+const API = process.env.SERVER_URL || 'http://localhost:3001';
 
 interface TestResult {
     name: string;
@@ -75,7 +77,8 @@ async function testBookmarkSave() {
         url: 'https://x.com/testuser/status/123',
         author: 'Test User · @testuser',
         text: 'This is a test tweet with some text content.',
-        media: ['https://pbs.twimg.com/media/test.jpg'],
+        // Use a URL that returns 200 so media download succeeds (avoids Twitter CDN 403)
+        media: ['https://placehold.co/1x1.png'],
         links: [],
     });
 

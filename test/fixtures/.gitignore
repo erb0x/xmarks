@@ -1,0 +1,2 @@
+# Ignore large PDFs; use REFERENCE_PDF env or paste text into .txt
+*.pdf

@@ -1,13 +1,17 @@
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
+import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import { getConfig } from './lib/config.js';
+import { savePdfForBookmark, extractTextFromPdf } from './lib/pdfService.js';
 import {
   initDb,
   upsertBookmark,
   getBookmarks,
   getMediaCount,
+  getMediaUrlsForBookmark,
   getArticlesCount,
   getSyntheticArticleMdLength,
   insertMedia,
@@ -22,6 +26,7 @@ import {
   upsertTranscript,
 } from './lib/db.js';
 import { processLinks, extractArticle } from './lib/articleExtractor.js';
+import { cleanArticleTextWithOpenAI } from './lib/articleCleaner.js';
 import { exportBookmarks } from './lib/exporter.js';
 import { downloadMediaFile } from './lib/mediaService.js';
 import { TranscriptionService } from './lib/transcriptionService.js';
@@ -47,6 +52,14 @@ app.use(express.json({ limit: '50mb' }));
 const mediaDir = path.join(dataDir, 'media');
 if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir, { recursive: true });
 app.use('/media', express.static(mediaDir));
+
+// PDF upload: memory storage (single file field "pdf")
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
+
+// Serve stored article PDFs (safe: express.static resolves under dataDir/articles)
+const articlesDir = path.join(dataDir, 'articles');
+if (!fs.existsSync(articlesDir)) fs.mkdirSync(articlesDir, { recursive: true });
+app.use('/articles', express.static(articlesDir));
 
 // ─── Transcription Service ────────────────────────────────────
 const transcriptionService = new TranscriptionService(config);
@@ -74,23 +87,34 @@ app.post('/api/bookmarks', async (req, res) => {
     fs.appendFileSync(path.join(dataDir, 'server.log'), logMsg);
     console.log(logMsg);
 
-    const existingMediaCount = getMediaCount(db, id);
-    const runMedia = media && Array.isArray(media) && media.length > 0 && (existingMediaCount === 0 || forceMedia);
+    const existingArticlesCount = getArticlesCount(db, id);
+    const existingMediaUrls = getMediaUrlsForBookmark(db, id);
+    const bookmarkUrl = typeof url === 'string' ? url : '';
+
+    const isTweetStatusUrl = (u: string) =>
+      /^https?:\/\/(www\.)?(x\.com|twitter\.com)\/.+\/status\/\d+/.test(u);
+
+    const runMedia = media && Array.isArray(media) && media.length > 0;
     if (runMedia) {
-      if (forceMedia && existingMediaCount > 0) {
+      if (forceMedia && existingMediaUrls.length > 0) {
         deleteMediaForBookmark(db, id);
       }
-      (async () => {
-        for (const mediaUrl of media) {
-          const localPath = await downloadMediaFile(mediaDir, mediaUrl, id);
-          insertMedia(db, id, localPath || mediaUrl);
-        }
-        console.log(`[XMarks] Saved ${media.length} media file(s) for tweet ${id}`);
-      })().catch(err => console.error(`[Media] Error for ${id}:`, err));
+      const toProcess = forceMedia ? media : (media as string[]).filter((u: string) => !existingMediaUrls.includes(u));
+      if (toProcess.length > 0) {
+        (async () => {
+          for (const mediaUrl of toProcess) {
+            if (isTweetStatusUrl(mediaUrl)) {
+              insertMedia(db, id, mediaUrl);
+              continue;
+            }
+            const localPath = await downloadMediaFile(mediaDir, mediaUrl, id);
+            insertMedia(db, id, localPath || mediaUrl);
+          }
+          console.log(`[XMarks] Saved ${toProcess.length} media item(s) for tweet ${id}`);
+        })().catch(err => console.error(`[Media] Error for ${id}:`, err));
+      }
     }
 
-    const existingArticlesCount = getArticlesCount(db, id);
-    const incomingThreadLen = typeof threadText === 'string' ? threadText.trim().length : 0;
     const runExtract = tweetLinks && Array.isArray(tweetLinks) && tweetLinks.length > 0 && (existingArticlesCount === 0 || forceExtract);
     if (runExtract) {
       processLinks(tweetLinks).then(({ links, articles }) => {
@@ -101,40 +125,36 @@ app.post('/api/bookmarks', async (req, res) => {
       }).catch(err => {
         console.error(`[XMarks] Article extraction failed for ${id}:`, err);
       });
-    } else {
+    } else if (existingArticlesCount === 0) {
       const md = (
         typeof threadText === 'string' && threadText.trim().length > 0
           ? threadText.trim()
           : (typeof text === 'string' ? text.trim() : '')
       );
-      if (!md) {
-        res.json({ status: 'success', saved: true });
-        return;
+      if (md) {
+        const hasNoLinks = !tweetLinks || !Array.isArray(tweetLinks) || tweetLinks.length === 0;
+        const existingSyntheticLen = getSyntheticArticleMdLength(db, id);
+        const shouldSaveSynthetic =
+          hasNoLinks && (
+            forceExtract ||
+            existingSyntheticLen === null ||
+            md.length > existingSyntheticLen
+          );
+        if (shouldSaveSynthetic) {
+          const html = `<p>${escapeHtml(md).replace(/\n/g, '<br/>')}</p>`;
+          replaceLinksAndArticles(db, id, [], [
+            {
+              url: bookmarkUrl,
+              title: `X thread by ${author || 'Unknown'}`,
+              author: author || null,
+              content: html,
+              contentMd: md,
+              excerpt: md.slice(0, 300),
+              siteName: 'X',
+            },
+          ]);
+        }
       }
-      const hasNoLinks = !tweetLinks || !Array.isArray(tweetLinks) || tweetLinks.length === 0;
-      const existingSyntheticLen = getSyntheticArticleMdLength(db, id);
-      const shouldSaveSynthetic =
-        hasNoLinks && (
-          existingArticlesCount === 0 ||
-          forceExtract ||
-          (existingSyntheticLen !== null && md.length > existingSyntheticLen)
-        );
-      if (!shouldSaveSynthetic) {
-        res.json({ status: 'success', saved: true });
-        return;
-      }
-      const html = `<p>${escapeHtml(md).replace(/\n/g, '<br/>')}</p>`;
-      replaceLinksAndArticles(db, id, [], [
-        {
-          url: url || '',
-          title: `X thread by ${author || 'Unknown'}`,
-          author: author || null,
-          content: html,
-          contentMd: md,
-          excerpt: md.slice(0, 300),
-          siteName: 'X',
-        },
-      ]);
     }
 
     res.json({ status: 'success', saved: true });
@@ -245,7 +265,7 @@ app.delete('/api/bookmarks/:id', (req, res) => {
 // ─── POST /api/bookmarks/:id/article (attach full article by URL or paste) ─
 app.post('/api/bookmarks/:id/article', async (req, res) => {
   const id = req.params.id;
-  const { url: articleUrl, rawMarkdown } = req.body;
+  const { url: articleUrl, rawMarkdown, cleanWithOpenAI } = req.body;
 
   try {
     const bookmarks = getBookmarks(db);
@@ -266,7 +286,10 @@ app.post('/api/bookmarks/:id/article', async (req, res) => {
     }
 
     if (rawMarkdown && typeof rawMarkdown === 'string' && rawMarkdown.trim()) {
-      const md = rawMarkdown.trim();
+      let md = rawMarkdown.trim();
+      if (cleanWithOpenAI) {
+        md = await cleanArticleTextWithOpenAI(config, md);
+      }
       const html = `<p>${escapeHtml(md).replace(/\n/g, '<br/>')}</p>`;
       replaceLinksAndArticles(db, id, [], [
         {
@@ -286,6 +309,54 @@ app.post('/api/bookmarks/:id/article', async (req, res) => {
   } catch (error) {
     console.error('Error attaching article:', error);
     res.status(500).json({ error: 'Failed to attach article' });
+  }
+});
+
+// ─── POST /api/bookmarks/:id/article/pdf (attach article as PDF; primary path) ─
+app.post('/api/bookmarks/:id/article/pdf', upload.single('pdf'), async (req, res) => {
+  const id = req.params.id;
+  const file = req.file;
+
+  if (!file || !file.buffer) {
+    return res.status(400).json({ error: 'No PDF file uploaded; use field name "pdf"' });
+  }
+
+  try {
+    const bookmarks = getBookmarks(db);
+    const exists = bookmarks.some((b) => b.id === id);
+    if (!exists) {
+      return res.status(404).json({ error: 'Bookmark not found' });
+    }
+
+    const { fullPath, urlPath } = await savePdfForBookmark(dataDir, id, file.buffer);
+    let text = '';
+    try {
+      text = await extractTextFromPdf(fullPath);
+    } catch (err) {
+      console.error('[PDF] Extract text failed:', err);
+    }
+    const cleanWithOpenAI = req.query?.cleanWithOpenAI === 'true' || req.body?.cleanWithOpenAI === 'true' || req.body?.cleanWithOpenAI === true;
+    if (cleanWithOpenAI && text) {
+      text = await cleanArticleTextWithOpenAI(config, text);
+    }
+    const excerpt = text.slice(0, 300);
+    const html = `<p>${escapeHtml(text).replace(/\n/g, '<br/>')}</p>`;
+    replaceLinksAndArticles(db, id, [], [
+      {
+        url: '',
+        title: 'Imported article (PDF)',
+        author: null,
+        content: html,
+        contentMd: text,
+        excerpt: excerpt || null,
+        siteName: 'PDF',
+        pdf_path: urlPath,
+      },
+    ]);
+    return res.json({ status: 'success', source: 'pdf', pdf_path: urlPath });
+  } catch (error) {
+    console.error('Error attaching PDF article:', error);
+    res.status(500).json({ error: 'Failed to attach PDF article' });
   }
 });
 
@@ -317,6 +388,20 @@ app.post('/api/bookmarks/:id/transcribe', async (req, res) => {
         status: 'success',
         transcript: existing.transcript,
         strategy: 'cached',
+      });
+    }
+    const keyPath = config.openaiKeyPath;
+    if (!keyPath || !fs.existsSync(keyPath)) {
+      return res.status(503).json({
+        error: 'OpenAI API key not configured',
+        details: 'Set XMARKS_OPENAI_KEY_PATH to a file path containing your OpenAI API key (used for Whisper transcription).',
+      });
+    }
+    const keyContent = fs.readFileSync(keyPath, 'utf-8').trim();
+    if (!keyContent) {
+      return res.status(503).json({
+        error: 'OpenAI API key file is empty',
+        details: `File at ${keyPath} must contain your OpenAI API key.`,
       });
     }
     console.log(`[XMarks] Triggering transcription for bookmark ${id}...`);

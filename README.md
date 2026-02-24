@@ -17,14 +17,28 @@ npm run dev
 
 Then open **http://localhost:5173**, go to the **Setup** tab, and follow the Tampermonkey installation instructions.
 
-## Article quality and alternatives
+## Articles, tweets, and videos
 
-- **Attach full article:** On any bookmark card, use **Attach full article** to add or replace the saved article by pasting a **URL** (server will fetch and extract with Readability) or by **pasting full text/markdown**. Use this when the tweet’s thread or links didn’t capture the full article.
-- **Article quality harness:** Compare saved article content to a reference (e.g. a PDF of the full article):
-  ```bash
-  REFERENCE_PDF="path/to/article.pdf" BOOKMARK_ID=2025286163641118915 npm run test:article-quality
-  ```
-  Or use a text file: `REFERENCE_TEXT="test/fixtures/koylan-article-full.txt"`. See [test/fixtures/README.md](test/fixtures/README.md) for env options and `COVERAGE_THRESHOLD`.
+- **Articles (PDF-first):** The primary way to save a full article is to **upload a PDF** for a bookmark. The server stores the PDF under `data/articles/<bookmark_id>/`, extracts text from it for search and display, and links “View PDF” in the UI. You can also attach by **URL** (Readability extraction) or **paste** text/markdown.
+- **Tweet posts:** Tweet and thread text are extracted as-is (synthetic article when there are no external links). No PDF is created for tweets.
+- **Videos:** Whisper transcription is used for saved video media; transcripts are stored and shown in the dashboard.
+
+## Article quality harness
+
+Compare saved article content to a reference (e.g. a PDF of the full article):
+
+```bash
+REFERENCE_PDF="path/to/article.pdf" BOOKMARK_ID=2025286163641118915 npm run test:article-quality
+```
+
+Or use a text file: `REFERENCE_TEXT="test/fixtures/koylan-article-full.txt"`. See [test/fixtures/README.md](test/fixtures/README.md) for env options and `COVERAGE_THRESHOLD`.
+
+## Testing harness
+
+- **Unit tests:** `npm run test:unit` — Vitest, covers DB, PDF service, article extractor, transcription service.
+- **Integration tests:** `npm run test:integration` — Full pipeline against a running server (port 3001): bookmark save, PDF attach, synthetic thread article, article extraction, search, export. Start the server with `npm run dev` in another terminal first.
+- **Article quality:** `npm run test:article-quality` — Optional; requires `REFERENCE_PDF` or `REFERENCE_TEXT` and compares saved article content to the reference.
+- **All:** `npm run test` runs unit then integration tests.
 
 ## Stack
 

@@ -1,9 +1,12 @@
 import OpenAI from 'openai';
-import { createReadStream, existsSync, mkdirSync, readFileSync } from 'fs';
+import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, readdirSync, unlinkSync } from 'fs';
 import path from 'path';
 import ytDlp, { create as createYtDlp } from 'yt-dlp-exec';
 import ffmpeg from 'fluent-ffmpeg';
 import type { Config } from './config.js';
+
+/** Whisper API limit (25 MB). We use 24 MB to stay under. */
+const WHISPER_MAX_BYTES = 24 * 1024 * 1024;
 
 /** Sanitize bookmark id for use in filenames (avoid path traversal and invalid chars). */
 export function sanitizeBookmarkId(bookmarkId: string): string {
@@ -121,19 +124,81 @@ export class TranscriptionService {
     });
   }
 
+  /**
+   * Split audio into segments under Whisper's 25 MB limit.
+   * Uses 10-minute segments (safe for typical MP3 bitrates).
+   */
+  private async splitAudioIntoChunks(filePath: string): Promise<string[]> {
+    const segmentDurationSec = 600;
+    const dir = path.dirname(filePath);
+    const base = path.basename(filePath, path.extname(filePath));
+    const pattern = path.join(dir, `${base}_chunk_%03d.mp3`);
+
+    return new Promise((resolve, reject) => {
+      ffmpeg(filePath)
+        .outputOptions([
+          '-f', 'segment',
+          '-segment_time', String(segmentDurationSec),
+          '-c', 'copy',
+          '-reset_timestamps', '1',
+        ])
+        .output(pattern)
+        .on('end', () => {
+          const names = readdirSync(dir)
+            .filter((f) => f.startsWith(`${base}_chunk_`) && f.endsWith('.mp3'))
+            .sort();
+          resolve(names.map((n) => path.join(dir, n)));
+        })
+        .on('error', reject)
+        .run();
+    });
+  }
+
   private async transcribeWithOpenAI(filePath: string, videoUrl: string): Promise<TranscriptionResult> {
     if (!this.openai) throw new Error('OpenAI client not initialized');
 
-    console.log(`[Transcription] Sending to OpenAI...`);
-    const response = await this.openai.audio.transcriptions.create({
-      file: createReadStream(filePath),
-      model: 'whisper-1',
-    });
+    const stat = statSync(filePath);
+    const size = stat.size;
 
-    return {
-      transcript: response.text,
-      videoUrl,
-      strategy: 'openai',
-    };
+    if (size <= WHISPER_MAX_BYTES) {
+      console.log(`[Transcription] Sending to OpenAI (${(size / 1024 / 1024).toFixed(1)} MB)...`);
+      const response = await this.openai.audio.transcriptions.create({
+        file: createReadStream(filePath),
+        model: 'whisper-1',
+      });
+      return {
+        transcript: response.text || '',
+        videoUrl,
+        strategy: 'openai',
+      };
+    }
+
+    console.log(`[Transcription] File ${(size / 1024 / 1024).toFixed(1)} MB exceeds 25 MB limit, splitting into chunks...`);
+    const chunks = await this.splitAudioIntoChunks(filePath);
+    const parts: string[] = [];
+
+    try {
+      for (let i = 0; i < chunks.length; i++) {
+        console.log(`[Transcription] Sending chunk ${i + 1}/${chunks.length} to OpenAI...`);
+        const response = await this.openai.audio.transcriptions.create({
+          file: createReadStream(chunks[i]),
+          model: 'whisper-1',
+        });
+        if (response.text?.trim()) parts.push(response.text.trim());
+      }
+      return {
+        transcript: parts.join('\n\n'),
+        videoUrl,
+        strategy: 'openai',
+      };
+    } finally {
+      for (const chunk of chunks) {
+        try {
+          unlinkSync(chunk);
+        } catch {
+          // ignore
+        }
+      }
+    }
   }
 }

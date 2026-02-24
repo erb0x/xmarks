@@ -13,6 +13,7 @@ interface Article {
   site_name: string | null;
   content_md: string;
   extracted_at: string;
+  pdf_path: string | null;
 }
 
 interface Bookmark {
@@ -41,6 +42,7 @@ export default function BookmarksList({ searchQuery, refreshKey }: Props) {
   const [attachArticleId, setAttachArticleId] = useState<string | null>(null);
   const [attachUrl, setAttachUrl] = useState('');
   const [attachRawMarkdown, setAttachRawMarkdown] = useState('');
+  const [attachPdfFile, setAttachPdfFile] = useState<File | null>(null);
   const [attachSubmitting, setAttachSubmitting] = useState(false);
   const [attachError, setAttachError] = useState<string | null>(null);
 
@@ -128,6 +130,30 @@ export default function BookmarksList({ searchQuery, refreshKey }: Props) {
       await fetchBookmarks();
     } catch (err) {
       setAttachError(err instanceof Error ? err.message : 'Failed to attach article');
+    } finally {
+      setAttachSubmitting(false);
+    }
+  };
+
+  const handleAttachPdf = async (id: string, file: File) => {
+    setAttachSubmitting(true);
+    setAttachError(null);
+    try {
+      const formData = new FormData();
+      formData.append('pdf', file);
+      const response = await fetch(`/api/bookmarks/${id}/article/pdf`, {
+        method: 'POST',
+        body: formData,
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to upload PDF');
+      }
+      setAttachArticleId(null);
+      setAttachPdfFile(null);
+      await fetchBookmarks();
+    } catch (err) {
+      setAttachError(err instanceof Error ? err.message : 'Failed to upload PDF');
     } finally {
       setAttachSubmitting(false);
     }
@@ -268,32 +294,37 @@ export default function BookmarksList({ searchQuery, refreshKey }: Props) {
                   </div>
                 )}
 
-                {/* Transcription Button */}
-                {bookmark.media && bookmark.media.some(url => url.includes('video') || url.includes('.mp4')) && (
-                  <div className="transcription-trigger">
-                    {bookmark.transcripts && bookmark.transcripts.length > 0 ? (
-                      <div className="transcript-panel">
-                        <div className="transcript-header">
-                          <Video size={12} />
-                          <span>Transcript</span>
+                {/* Transcription: show when tweet has video (script adds status URL to media for video tweets, or explicit video/.mp4 URL) */}
+                {bookmark.media && bookmark.media.some(url => url === bookmark.url || url.includes('video') || url.includes('.mp4')) && (() => {
+                  const videoUrl =
+                    bookmark.media.find(url => url === bookmark.url || url.includes('video') || url.includes('.mp4'))
+                    || bookmark.media[0];
+                  return (
+                    <div className="transcription-trigger">
+                      {bookmark.transcripts && bookmark.transcripts.length > 0 ? (
+                        <div className="transcript-panel">
+                          <div className="transcript-header">
+                            <Video size={12} />
+                            <span>Transcript</span>
+                          </div>
+                          <p className="transcript-text">{bookmark.transcripts[0].transcript}</p>
                         </div>
-                        <p className="transcript-text">{bookmark.transcripts[0].transcript}</p>
-                      </div>
-                    ) : (
-                      <button
-                        className="btn-secondary btn-sm"
-                        onClick={() => handleTranscribe(bookmark.id, bookmark.media.find(url => url.includes('video') || url.includes('.mp4')) || bookmark.media[0])}
-                        disabled={transcribingIds.has(bookmark.id)}
-                      >
-                        {transcribingIds.has(bookmark.id) ? (
-                          <><div className="spinner spinner-xs" /> Transcribing...</>
-                        ) : (
-                          <><Video size={14} /> Transcribe Video</>
-                        )}
-                      </button>
-                    )}
-                  </div>
-                )}
+                      ) : (
+                        <button
+                          className="btn-secondary btn-sm"
+                          onClick={() => handleTranscribe(bookmark.id, videoUrl)}
+                          disabled={transcribingIds.has(bookmark.id)}
+                        >
+                          {transcribingIds.has(bookmark.id) ? (
+                            <><div className="spinner spinner-xs" /> Transcribing...</>
+                          ) : (
+                            <><Video size={14} /> Transcribe Video</>
+                          )}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 {/* Attach full article */}
                 <div className="attach-article-section">
@@ -306,6 +337,7 @@ export default function BookmarksList({ searchQuery, refreshKey }: Props) {
                       if (attachArticleId !== bookmark.id) {
                         setAttachUrl('');
                         setAttachRawMarkdown('');
+                        setAttachPdfFile(null);
                       }
                     }}
                   >
@@ -333,6 +365,25 @@ export default function BookmarksList({ searchQuery, refreshKey }: Props) {
                           rows={6}
                           disabled={attachSubmitting}
                         />
+                      </label>
+                      <label>
+                        <span>Or upload PDF (primary)</span>
+                        <input
+                          type="file"
+                          accept=".pdf,application/pdf"
+                          onChange={(e) => setAttachPdfFile(e.target.files?.[0] ?? null)}
+                          disabled={attachSubmitting}
+                        />
+                        {attachPdfFile && (
+                          <button
+                            type="button"
+                            className="btn-primary btn-sm"
+                            disabled={attachSubmitting}
+                            onClick={() => handleAttachPdf(bookmark.id, attachPdfFile)}
+                          >
+                            {attachSubmitting ? 'Uploading...' : 'Upload PDF'}
+                          </button>
+                        )}
                       </label>
                       {attachError && <p className="attach-article-error">{attachError}</p>}
                       <button
@@ -373,9 +424,16 @@ export default function BookmarksList({ searchQuery, refreshKey }: Props) {
                           )}
                           {isArticleExpanded && (
                             <div className="article-content">
-                              <a href={article.url} target="_blank" rel="noopener noreferrer" className="article-url">
-                                <Globe size={11} /> {article.url}
-                              </a>
+                              {article.pdf_path && (
+                                <a href={`/articles/${article.pdf_path}`} target="_blank" rel="noopener noreferrer" className="article-url">
+                                  <FileText size={11} /> View PDF
+                                </a>
+                              )}
+                              {article.url && (
+                                <a href={article.url} target="_blank" rel="noopener noreferrer" className="article-url">
+                                  <Globe size={11} /> {article.url}
+                                </a>
+                              )}
                               <div className="article-md" dangerouslySetInnerHTML={{
                                 __html: article.content_md
                                   .replace(/</g, '&lt;')

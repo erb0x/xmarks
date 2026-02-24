@@ -77,6 +77,27 @@ describe('db', () => {
     expect(getArticlesCount(db, 'b1')).toBe(0);
   });
 
+  it('articles with pdf_path are stored and returned by enrichBookmarks', () => {
+    upsertBookmark(db, { id: 'b1', url: '', author: '', text: '' });
+    replaceLinksAndArticles(db, 'b1', [], [
+      {
+        url: '',
+        title: 'PDF Article',
+        author: null,
+        content: '<p>Content</p>',
+        contentMd: 'Content',
+        excerpt: 'Content',
+        siteName: 'PDF',
+        pdf_path: 'b1/article_123.pdf',
+      },
+    ]);
+    const bookmarks = getBookmarks(db);
+    const enriched = enrichBookmarks(db, bookmarks);
+    expect(enriched[0].articles).toHaveLength(1);
+    expect(enriched[0].articles[0].pdf_path).toBe('b1/article_123.pdf');
+    expect(enriched[0].articles[0].title).toBe('PDF Article');
+  });
+
   it('getTranscriptByBookmarkAndVideo and upsertTranscript', () => {
     upsertBookmark(db, { id: 'b1', url: '', author: '', text: '' });
     expect(getTranscriptByBookmarkAndVideo(db, 'b1', 'https://youtube.com/v')).toBeUndefined();

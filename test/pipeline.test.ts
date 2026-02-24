@@ -45,6 +45,13 @@ async function api(method: string, path: string, body?: any) {
     return { status: res.status, data: await res.json() };
 }
 
+async function apiMultipart(path: string, fieldName: string, buffer: Buffer, filename: string) {
+    const form = new FormData();
+    form.append(fieldName, new Blob([buffer]), filename);
+    const res = await fetch(`${API}${path}`, { method: 'POST', body: form });
+    return { status: res.status, data: await res.json() };
+}
+
 async function cleanup(ids: string[]) {
     for (const id of ids) {
         await api('DELETE', `/api/bookmarks/${id}`);
@@ -220,6 +227,94 @@ async function testArticleExtraction() {
     await cleanup([testId]);
 }
 
+async function testPdfAttach() {
+    console.log('\n═══ PDF ATTACH (primary article path) ═══');
+    const testId = 'test_pdf_001';
+
+    await api('POST', '/api/bookmarks', {
+        id: testId,
+        url: 'https://x.com/user/status/111',
+        author: 'PDF User · @pdfuser',
+        text: 'Tweet with PDF article',
+        media: [],
+        links: [],
+    });
+
+    const minimalPdf = Buffer.from(
+        '%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/MediaBox[0 0 612 792]/Parent 2 0 R>>endobj\nxref\n0 4\n0000000000 65535 f \n0000000009 00000 n \n0000000052 00000 n \n0000000101 00000 n \ntrailer<</Size 4/Root 1 0 R>>\nstartxref\n178\n%%EOF'
+    );
+
+    const { status, data } = await apiMultipart(
+        `/api/bookmarks/${testId}/article/pdf`,
+        'pdf',
+        minimalPdf,
+        'sample.pdf'
+    );
+
+    if (status !== 200 || !data.status || data.status !== 'success') {
+        fail('PDF attach returns success', `Status: ${status}, data: ${JSON.stringify(data)}`);
+        await cleanup([testId]);
+        return;
+    }
+    pass('PDF attach returns 200 and success');
+
+    const { data: bookmarks } = await api('GET', '/api/bookmarks');
+    const found = bookmarks.find((b: any) => b.id === testId);
+    if (!found || !found.articles || found.articles.length === 0) {
+        fail('Bookmark has article after PDF attach');
+        await cleanup([testId]);
+        return;
+    }
+    const article = found.articles[0];
+    if (article.pdf_path) {
+        pass('Article has pdf_path', article.pdf_path);
+    } else {
+        fail('Article has pdf_path');
+    }
+    if (article.content_md !== undefined) {
+        pass('Article has content_md', `${article.content_md.length} chars`);
+    } else {
+        fail('Article has content_md');
+    }
+
+    await cleanup([testId]);
+}
+
+async function testSyntheticArticle() {
+    console.log('\n═══ SYNTHETIC ARTICLE (tweet thread) ═══');
+    const testId = 'test_thread_001';
+
+    await api('POST', '/api/bookmarks', {
+        id: testId,
+        url: 'https://x.com/user/status/222',
+        author: 'Thread Author · @threader',
+        text: 'First tweet text',
+        threadText: 'First tweet text\n\n---\n\nSecond tweet in thread.',
+        media: [],
+        links: [],
+    });
+
+    const { data: bookmarks } = await api('GET', '/api/bookmarks');
+    const found = bookmarks.find((b: any) => b.id === testId);
+    if (!found) {
+        fail('Bookmark saved with threadText');
+        await cleanup([testId]);
+        return;
+    }
+    if (found.articles && found.articles.length > 0) {
+        const art = found.articles[0];
+        if (art.site_name === 'X' && art.content_md && art.content_md.includes('Second tweet')) {
+            pass('Synthetic thread article saved', 'site_name=X, content has thread');
+        } else {
+            pass('Synthetic article present', art.title || '');
+        }
+    } else {
+        fail('Synthetic article from threadText', 'No articles');
+    }
+
+    await cleanup([testId]);
+}
+
 async function testLinkResolution() {
     console.log('\n═══ LINK RESOLUTION (t.co redirect) ═══');
     const testId = 'test_tco_001';
@@ -363,6 +458,8 @@ async function main() {
     await testServerHealth();
     await testBookmarkSave();
     await testEmptyTextBookmark();
+    await testPdfAttach();
+    await testSyntheticArticle();
     await testArticleExtraction();
     await testLinkResolution();
     await testSearch();

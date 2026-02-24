@@ -34,6 +34,7 @@ export interface ArticleRow {
   excerpt: string | null;
   site_name: string | null;
   extracted_at: string;
+  pdf_path: string | null;
 }
 
 export interface TranscriptRow {
@@ -78,6 +79,7 @@ const SCHEMA = `
     excerpt TEXT,
     site_name TEXT,
     extracted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    pdf_path TEXT,
     FOREIGN KEY(bookmark_id) REFERENCES bookmarks(id) ON DELETE CASCADE
   );
   CREATE TABLE IF NOT EXISTS transcripts (
@@ -95,6 +97,12 @@ export function initDb(dbPath: string): Database.Database {
   const db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
   db.exec(SCHEMA);
+  // Migration: add pdf_path to articles if missing (existing DBs)
+  try {
+    db.exec('ALTER TABLE articles ADD COLUMN pdf_path TEXT');
+  } catch {
+    // Column already exists
+  }
   return db;
 }
 
@@ -122,6 +130,12 @@ export function getBookmarks(db: Database.Database): BookmarkRow[] {
 export function getMediaCount(db: Database.Database, bookmarkId: string): number {
   const row = db.prepare('SELECT COUNT(*) as count FROM media WHERE bookmark_id = ?').get(bookmarkId) as { count: number };
   return row.count;
+}
+
+/** Returns stored media URLs for a bookmark (for merge-on-resync). */
+export function getMediaUrlsForBookmark(db: Database.Database, bookmarkId: string): string[] {
+  const rows = db.prepare('SELECT url FROM media WHERE bookmark_id = ?').all(bookmarkId) as { url: string }[];
+  return rows.map((r) => r.url);
 }
 
 export function insertMedia(db: Database.Database, bookmarkId: string, url: string): void {
@@ -164,6 +178,7 @@ export interface ArticleInput {
   contentMd: string;
   excerpt: string | null;
   siteName: string | null;
+  pdf_path?: string | null;
 }
 
 export function replaceLinksAndArticles(
@@ -182,8 +197,8 @@ export function replaceLinksAndArticles(
       linkStmt.run(bookmarkId, link.originalUrl, link.resolvedUrl, link.isArticle ? 1 : 0);
     }
     const articleStmt = db.prepare(
-      `INSERT INTO articles (bookmark_id, url, title, author, content, content_md, excerpt, site_name)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO articles (bookmark_id, url, title, author, content, content_md, excerpt, site_name, pdf_path)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
     for (const article of articles) {
       articleStmt.run(
@@ -194,7 +209,8 @@ export function replaceLinksAndArticles(
         article.content,
         article.contentMd,
         article.excerpt,
-        article.siteName
+        article.siteName,
+        article.pdf_path ?? null
       );
     }
   })();
@@ -261,6 +277,7 @@ export interface EnrichedBookmark extends BookmarkRow {
     site_name: string | null;
     content_md: string;
     extracted_at: string;
+    pdf_path: string | null;
   }>;
   transcripts: TranscriptRow[];
 }
@@ -300,6 +317,7 @@ export function enrichBookmarks(db: Database.Database, bookmarks: BookmarkRow[])
       site_name: a.site_name,
       content_md: a.content_md,
       extracted_at: a.extracted_at,
+      pdf_path: a.pdf_path ?? null,
     })),
     transcripts: transcriptMap[b.id] || [],
   }));
